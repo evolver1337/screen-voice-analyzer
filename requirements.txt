@@ -1,0 +1,9 @@
+PyQt6~=6.9.1
+sounddevice~=0.5.2
+webrtcvad==2.0.10
+pytesseract~=0.3.13
+opencv-python==4.9.0.80
+numpy~=2.2.6
+pillow~=10.2.0
+requests~=2.31.0
+python-dotenv~=1.0.1

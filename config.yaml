@@ -1,0 +1,8 @@
+audio:
+  sample_rate: 44100
+  vad_aggressiveness: 2
+
+# В config.yaml укажите дополнительные языки:
+ocr:
+  languages: ["eng", "rus"]
+  tesseract_path: "/usr/bin/tesseract"
