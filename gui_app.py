@@ -1,97 +1,79 @@
-import os
-import sys
-import requests
-from PyQt6.QtCore import QSize, QPoint
+import logging
+from PyQt6.QtCore import Qt, QPoint, QTimer, QRect, QSize
 from PyQt6.QtWidgets import (
-    QMainWindow, QPushButton, QVBoxLayout, QWidget,
-    QTextEdit, QComboBox, QProgressBar, QLabel,
-    QHBoxLayout, QGroupBox, QLineEdit, QRubberBand,
-    QApplication
+    QMainWindow, QVBoxLayout, QHBoxLayout, QWidget,
+    QTextEdit, QPushButton, QComboBox, QProgressBar,
+    QLabel, QGroupBox, QLineEdit, QListWidget, QRubberBand
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRect
 from PyQt6.QtGui import QTextCursor
-
-from api_client import APIWorker
-from audio_processor import AudioSystem
-from ocr_analyzer import CodeAnalyzer
+from audio_manager import AudioManager
+from screenshot_manager import ScreenshotManager
+from history_manager import HistoryManager
+from speech_recognizer import WhisperRecognizer
+from text_formatter import TextFormatter, MarkdownHighlighter
+from api_client import APIWorker, APIClient  # Ваш реальный клиент API
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        # Инициализация систем
-        self.audio = AudioSystem()
-        self.current_mode = "system"  # system/microphone/off
-        self.api_worker = None
-        self.selected_region = None
+        self.whisper = WhisperRecognizer()
+        self._init_managers()
+        self._setup_ui()
+        self._connect_signals()
+        self._setup_styles()
+        self._init_rubber_band()
+        logging.info("Application initialized")
 
-        # Настройка интерфейса
-        self.setMouseTracking(True)
-        self.origin = QPoint()
-        self.setup_ui()
-        self.setup_styles()
+    def _init_managers(self):
+        """Инициализация всех менеджеров"""
+        self.api_client = APIClient()  # Ваш реальный API клиент
+        self.audio_manager = AudioManager()
+        self.screenshot_manager = ScreenshotManager()
+        self.text_formatter = TextFormatter()
+
+        self.history_panel = QListWidget()
+        self.history_manager = HistoryManager(self.history_panel)
+
+    def _setup_ui(self):
+        """Настройка пользовательского интерфейса"""
         self.setWindowTitle("AI Code Analyzer Pro")
-        self.setMinimumSize(1000, 800)
+        self.setMinimumSize(1000, 700)
 
-    def setup_ui(self):
-        """Инициализация основного интерфейса"""
-        self.setup_main_widgets()
-        self.setup_tool_panel()
-        self.setup_rubber_band()
-        self.setup_layout()
+        # Главный контейнер
+        main_widget = QWidget()
+        main_layout = QHBoxLayout(main_widget)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(15)
 
-    def setup_main_widgets(self):
-        """Создание основных виджетов"""
-        self.response_area = QTextEdit()
-        self.response_area.setReadOnly(False)
-        self.question_input = QLineEdit()
-        self.question_input.setPlaceholderText("Введите вопрос...")
-        self.progress_bar = QProgressBar()
-        self.status_label = QLabel("🔴 Ожидание действий")
+        # Панель истории (слева)
+        self._setup_history_panel()
+        main_layout.addWidget(self.history_panel, stretch=1)
 
-    def setup_tool_panel(self):
-        """Панель инструментов"""
-        self.tool_group = QGroupBox("Инструменты")
+        # Основная панель (справа)
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setSpacing(10)
 
         # Виджеты
-        self.api_selector = QComboBox()
-        self.api_selector.addItems(["Cody" ,"DeepSeek", "OpenAI"])
+        self._setup_tool_panel()
+        self._setup_text_areas()
+        self._setup_status_bar()
 
-        self.audio_mode = QComboBox()
-        self.audio_mode.addItems(["Системный звук", "Микрофон", "Выключено"])
-        self.audio_mode.setCurrentIndex(0)  # По умолчанию "Системный звук"
+        right_layout.addWidget(self.tool_group)
+        right_layout.addWidget(self.response_area, stretch=3)
+        right_layout.addWidget(self.question_input)
+        right_layout.addWidget(self.progress_bar)
+        right_layout.addWidget(self.status_label)
 
-        self.btn_select_area = QPushButton("🖱️ Выбрать область")
-        self.btn_select_area.setCheckable(True)
-        self.btn_analyze = QPushButton("📸 Анализ кода")
-        self.btn_ask = QPushButton("❓ Задать вопрос")
-        self.btn_clear = QPushButton("🧹 Очистить")
-        self.btn_audio_toggle = QPushButton("🎤 Включить аудио")
+        main_layout.addWidget(right_panel, stretch=3)
+        self.setCentralWidget(main_widget)
 
-        # Компоновка
-        tool_layout = QHBoxLayout()
-        tool_layout.addWidget(QLabel("API:"))
-        tool_layout.addWidget(self.api_selector)
-        tool_layout.addWidget(QLabel("Режим:"))
-        tool_layout.addWidget(self.audio_mode)
-        tool_layout.addWidget(self.btn_select_area)
-        tool_layout.addWidget(self.btn_analyze)
-        tool_layout.addWidget(self.btn_ask)
-        tool_layout.addWidget(self.btn_clear)
-        tool_layout.addWidget(self.btn_audio_toggle)
-        self.tool_group.setLayout(tool_layout)
+        # Подсветка Markdown
+        self.highlighter = MarkdownHighlighter(self.response_area.document())
 
-        # Сигналы
-        self.btn_select_area.clicked.connect(self.toggle_area_selection)
-        self.btn_analyze.clicked.connect(self.analyze_code)
-        self.btn_ask.clicked.connect(self.ask_question)
-        self.btn_clear.clicked.connect(self.clear_output)
-        self.btn_audio_toggle.clicked.connect(self.toggle_audio_analysis)
-        self.audio_mode.currentIndexChanged.connect(self.change_audio_mode)
-        self.question_input.returnPressed.connect(self.ask_question)
-
-    def setup_rubber_band(self):
-        """Настройка резиновой полосы для выделения области"""
+    def _init_rubber_band(self):
+        """Инициализация резиновой полосы выделения"""
         self.rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self)
         self.rubber_band.setStyleSheet("""
             QRubberBand {
@@ -100,81 +82,204 @@ class MainWindow(QMainWindow):
             }
         """)
 
-    def setup_layout(self):
-        """Главная компоновка"""
-        main_layout = QVBoxLayout()
-        main_layout.addWidget(self.tool_group)
-        main_layout.addWidget(self.response_area)
-        main_layout.addWidget(self.question_input)
-        main_layout.addWidget(self.progress_bar)
-        main_layout.addWidget(self.status_label)
-
-        container = QWidget()
-        container.setLayout(main_layout)
-        self.setCentralWidget(container)
-
-    def setup_styles(self):
-        """Стилизация приложения"""
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #f5f7fa;
-                font-family: 'Segoe UI', Arial;
+    def _setup_history_panel(self):
+        """Настройка панели истории"""
+        self.history_panel.setMinimumWidth(250)
+        self.history_panel.setStyleSheet("""
+            QListWidget {
+                border: 1px solid #e1e4e8;
+                border-radius: 4px;
+                padding: 5px;
             }
-            QGroupBox {
-                border: 1px solid #d1d5db;
-                border-radius: 6px;
-                margin-top: 10px;
-                padding-top: 15px;
-            }
-            QTextEdit {
-                background-color: white;
-                border: 1px solid #d1d5db;
-                border-radius: 6px;
-                padding: 10px;
-                font-family: 'Consolas';
-            }
-            QPushButton {
-                padding: 8px 12px;
-                border-radius: 6px;
-                min-width: 100px;
-                background-color: #e5e7eb;
-            }
-            QPushButton:hover {
-                background-color: #d1d5db;
-            }
-            QProgressBar {
-                height: 12px;
-                border-radius: 6px;
-            }
-            QProgressBar::chunk {
-                background-color: #3b82f6;
-                border-radius: 6px;
+            QListWidget::item {
+                padding: 5px;
             }
         """)
 
-    # --- Функционал выделения области ---
-    def toggle_area_selection(self, checked):
-        """Переключение режима выделения области"""
-        self.setCursor(Qt.CursorShape.CrossCursor if checked else Qt.CursorShape.ArrowCursor)
-        self.btn_select_area.setText("🚫 Отменить" if checked else "🖱️ Выбрать область")
+    def _setup_tool_panel(self):
+        """Настройка панели инструментов"""
+        self.tool_group = QGroupBox("Инструменты")
+        layout = QHBoxLayout()
+        layout.setSpacing(10)
 
-        if checked:
-            self.rubber_band.show() if hasattr(self, 'origin') else self.rubber_band.hide()
-        else:
-            self.rubber_band.hide()
+        # Выбор API
+        self.api_selector = QComboBox()
+        self.api_selector.addItems(["Cody", "OpenAI", "DeepSeek"])
+
+        # Режим аудио
+        self.audio_mode = QComboBox()
+        self.audio_mode.addItems(["Системный звук", "Выключено"])
+
+        # Кнопки
+        self.btn_select_area = QPushButton("🖱️ Выбрать область")
+        self.btn_select_area.setCheckable(True)
+        self.btn_analyze = QPushButton("📸 Анализ кода")
+        self.btn_clear = QPushButton("🧹 Очистить")
+        self.btn_audio_toggle = QPushButton("🎤 Включить аудио")
+
+        layout.addWidget(QLabel("API:"))
+        layout.addWidget(self.api_selector)
+        layout.addWidget(QLabel("Режим:"))
+        layout.addWidget(self.audio_mode)
+        layout.addWidget(self.btn_select_area)
+        layout.addWidget(self.btn_analyze)
+        layout.addWidget(self.btn_clear)
+        layout.addWidget(self.btn_audio_toggle)
+
+        self.tool_group.setLayout(layout)
+
+    def _setup_text_areas(self):
+        """Настройка текстовых областей"""
+        # Область ответа
+        self.response_area = QTextEdit()
+        self.response_area.setReadOnly(False)
+        self.response_area.setAcceptRichText(True)
+
+        # Поле ввода вопроса
+        self.question_input = QLineEdit()
+        self.question_input.setPlaceholderText("Введите ваш вопрос...")
+        self.question_input.setClearButtonEnabled(True)
+
+    def _setup_status_bar(self):
+        """Настройка статус-бара"""
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setVisible(False)
+
+        self.status_label = QLabel("🔴 Ожидание действий")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    def _connect_signals(self):
+        """Подключение сигналов и слотов"""
+        # Кнопки
+        self.btn_select_area.clicked.connect(self._toggle_area_selection)
+        self.btn_analyze.clicked.connect(self._analyze_code)
+        self.btn_clear.clicked.connect(self._clear_output)
+        self.btn_audio_toggle.clicked.connect(self._toggle_audio)
+
+        # Выпадающие списки
+        self.audio_mode.currentIndexChanged.connect(self._change_audio_mode)
+
+        # Поле ввода
+        self.question_input.returnPressed.connect(self._ask_question)
+
+        # Менеджеры
+        self.audio_manager.status_changed.connect(self._update_status)
+        self.audio_manager.error_occurred.connect(self._handle_error)
+
+        self.screenshot_manager.text_extracted.connect(self._handle_text_extracted)
+        self.screenshot_manager.error_occurred.connect(self._handle_error)
+        self.screenshot_manager.screenshot_taken.connect(self._handle_screenshot_taken)
+
+        self.history_manager.item_requested.connect(self._load_history_item)
+
+        # API клиент
+        self.api_client.response_received.connect(self._handle_api_response)
+        self.api_client.error_occurred.connect(self._handle_error)
+        self.api_client.progress_updated.connect(self._update_progress)
+
+    def _setup_styles(self):
+        """Настройка стилей приложения"""
+        self.setStyleSheet("""
+            /* Основные стили */
+            QMainWindow {
+                background-color: #f8f9fa;
+                font-family: 'Segoe UI', Arial;
+            }
+
+            /* Группы */
+            QGroupBox {
+                border: 1px solid #dee2e6;
+                border-radius: 6px;
+                margin-top: 10px;
+                padding-top: 15px;
+                font-weight: bold;
+            }
+
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }
+
+            /* Кнопки */
+            QPushButton {
+                padding: 6px 12px;
+                border-radius: 4px;
+                border: 1px solid #ced4da;
+                background-color: #f8f9fa;
+                min-width: 80px;
+            }
+
+            QPushButton:hover {
+                background-color: #e2e6ea;
+            }
+
+            QPushButton:pressed {
+                background-color: #dae0e5;
+            }
+
+            QPushButton:checked {
+                background-color: #d1e7ff;
+            }
+
+            /* Выпадающие списки */
+            QComboBox {
+                padding: 5px;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                min-width: 100px;
+            }
+
+            /* Текстовые поля */
+            QTextEdit, QLineEdit {
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                padding: 8px;
+                font-size: 14px;
+                selection-background-color: #4CAF50;
+            }
+
+            /* Прогресс-бар */
+            QProgressBar {
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                text-align: center;
+                height: 20px;
+            }
+
+            QProgressBar::chunk {
+                background-color: #4CAF50;
+                width: 10px;
+            }
+
+            /* Список истории */
+            QListWidget {
+                alternate-background-color: #f8f9fa;
+            }
+
+            QListWidget::item:hover {
+                background-color: #e9ecef;
+            }
+
+            QListWidget::item:selected {
+                background-color: #d1e7ff;
+                color: #000;
+            }
+        """)
 
     def mousePressEvent(self, event):
-        """Обработка нажатия кнопки мыши"""
+        """Обработка нажатия мыши для выделения области"""
         if self.btn_select_area.isChecked() and event.button() == Qt.MouseButton.LeftButton:
-            self.origin = event.pos()  # Фиксируем начальную позицию
+            self.origin = event.pos()
             self.rubber_band.setGeometry(QRect(self.origin, QSize()))
             self.rubber_band.show()
-            event.accept()  # Явно принимаем событие
+            event.accept()
         else:
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        """Обработка движения мыши"""
+        """Обработка движения мыши для выделения области"""
         if self.btn_select_area.isChecked() and self.rubber_band.isVisible():
             self.rubber_band.setGeometry(QRect(self.origin, event.pos()).normalized())
             event.accept()
@@ -182,11 +287,10 @@ class MainWindow(QMainWindow):
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        """Обработка отпускания кнопки мыши"""
+        """Обработка отпускания мыши для завершения выделения"""
         if self.btn_select_area.isChecked() and self.rubber_band.isVisible():
             rect = self.rubber_band.geometry()
             if rect.width() > 10 and rect.height() > 10:
-                # Конвертируем координаты относительно экрана
                 screen_rect = QRect(
                     self.mapToGlobal(rect.topLeft()),
                     self.mapToGlobal(rect.bottomRight())
@@ -197,7 +301,7 @@ class MainWindow(QMainWindow):
                     screen_rect.width(),
                     screen_rect.height()
                 )
-                self.status_label.setText(f"✅ Область: {rect.width()}x{rect.height()} пикс.")
+                self._update_status(f"✅ Область: {rect.width()}x{rect.height()} пикс.")
 
             self.rubber_band.hide()
             self.btn_select_area.setChecked(False)
@@ -206,26 +310,101 @@ class MainWindow(QMainWindow):
         else:
             super().mouseReleaseEvent(event)
 
-    # --- Основной функционал ---
-    def analyze_code(self):
+    def _toggle_area_selection(self, checked):
+        """Переключение режима выбора области"""
+        self.setCursor(Qt.CursorShape.CrossCursor if checked else Qt.CursorShape.ArrowCursor)
+        self.btn_select_area.setText("🚫 Отменить" if checked else "🖱️ Выбрать область")
+
+    def _analyze_code(self):
         """Анализ кода в выделенной области"""
-        if not self.selected_region:
-            self.status_label.setText("❌ Сначала выберите область!")
+        if not hasattr(self, 'selected_region') or not self.selected_region:
+            self._handle_error("Сначала выберите область для захвата")
             return
 
+        self._start_processing("Захват экрана...")
+        self.screenshot_manager.set_region(self.selected_region)
+        self.screenshot_manager.capture_and_analyze()
+
+    def _ask_question(self):
+        """Отправка вопроса на анализ"""
+        question = self.question_input.text().strip()
+        if not question:
+            return
+
+        self._start_processing("Отправка запроса...")
+        self.question_input.setProperty("last_question", question)
+        self.question_input.clear()
+
+        # Реальная отправка через API клиент
+        self.api_client.send_request(
+            api_name=self.api_selector.currentText(),
+            prompt=question
+        )
+
+    def _toggle_audio(self):
+        """Переключение режима аудио"""
+        self.audio_manager.toggle_recording()
+        self.btn_audio_toggle.setText(
+            "⏹ Остановить" if self.audio_manager.is_recording
+            else "🎤 Включить аудио"
+        )
+
+    def _change_audio_mode(self, index):
+        """Изменение режима аудио"""
+        self.audio_manager.set_mode(index)
+
+    def _clear_output(self):
+        """Очистка вывода"""
+        self.response_area.clear()
+        self._update_status("Готово")
+
+    def _start_processing(self, message):
+        """Начало обработки"""
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
+        self._update_status(message)
+
+    def _finish_processing(self):
+        """Завершение обработки"""
+        self.progress_bar.setVisible(False)
+        self._update_status("Готово")
+
+    def _update_progress(self, value):
+        """Обновление прогресса"""
+        self.progress_bar.setValue(value)
+
+    def _update_status(self, message):
+        """Обновление статуса"""
+        self.status_label.setText(message)
+
+    def _handle_error(self, error):
+        """Обработка ошибки"""
+        self.response_area.append(self.text_formatter.format_error(error))
+        self._finish_processing()
+        logging.error(error)
+
+    def _handle_text_extracted(self, text):
+        """Обработка извлеченного текста"""
+        self.response_area.append(self.text_formatter.format_code(text))
+        self.ask_ai(text)
+
+    def _handle_screenshot_taken(self, pixmap):
+        """Обработка сделанного скриншота (можно сохранить или показать)"""
+        pass
+
+    def _handle_api_response(self, response):
+        """Обработка ответа от API"""
         try:
-            x, y, w, h = self.selected_region
-            self.start_processing("🟡 Захват экрана...")
+            # Сохраняем в историю
+            question = self.question_input.property("last_question")
+            self.history_manager.add_item(question, response)
 
-            # Получение кода через OCR
-            code_text = CodeAnalyzer.capture_and_analyze(region=(x, y, x + w, y + h))
-            self.response_area.append(f"🔍 Код:\n```\n{code_text}\n```\n")
-
-            # Отправка на анализ в ИИ
-            self.ask_ai(f"Проанализируй этот код:\n```\n{code_text}\n```")
+            # Отображаем ответ
+            self.response_area.append(self.text_formatter.format_text(response))
+            self._finish_processing()
 
         except Exception as e:
-            self.handle_error(str(e))
+            self._handle_error(f"Ошибка обработки ответа: {str(e)}")
 
     def ask_question(self):
         """Обработка вопроса пользователя"""
@@ -248,39 +427,21 @@ class MainWindow(QMainWindow):
         self.api_worker.progress.connect(self.update_progress)
         self.api_worker.start()
 
-    # --- Аудио функционал ---
-    def change_audio_mode(self, index):
-        """Изменение режима аудио (system/microphone/off)"""
-        self.current_mode = ["system", "microphone", "off"][index]
+    def _load_history_item(self, item_data):
+        """Загрузка элемента истории"""
+        self.response_area.clear()
+        question = item_data.get("prompt", "")
+        response = item_data.get("response", "")
 
-    def toggle_audio_analysis(self):
-        """Включение/выключение аудиоанализа"""
-        if self.btn_audio_toggle.text().startswith("🎤"):
-            self.start_audio_listening()
-            self.btn_audio_toggle.setText("⏹ Остановить аудио")
-            self.btn_audio_toggle.setStyleSheet("background-color: #ffcccc;")
-        else:
-            self.stop_audio_listening()
-            self.btn_audio_toggle.setText("🎤 Включить аудио")
-            self.btn_audio_toggle.setStyleSheet("")
+        self.response_area.append(
+            self.text_formatter.format_text(f"💬 Вопрос: {question}")
+        )
+        self.response_area.append(
+            self.text_formatter.format_text(f"🤖 Ответ: {response}")
+        )
 
-    def start_audio_listening(self):
-        """Запуск аудиозаписи в выбранном режиме"""
-        try:
-            if self.current_mode == "system":
-                self.audio.start_system_recording()
-            elif self.current_mode == "microphone":
-                self.audio.start_microphone_recording()
-            self.status_label.setText("🟢 Аудиоанализ активен")
-        except Exception as e:
-            self.handle_error(str(e))
+        # --- Вспомогательные методы ---
 
-    def stop_audio_listening(self):
-        """Остановка аудиозаписи"""
-        self.audio.stop_recording()
-        self.status_label.setText("🔴 Аудиоанализ остановлен")
-
-    # --- Вспомогательные методы ---
     def start_processing(self, message):
         """Начало длительной операции"""
         self.progress_bar.setValue(0)
@@ -323,8 +484,10 @@ class MainWindow(QMainWindow):
             self.status_label.setText("🟡 Обработка ответа...")
 
     def closeEvent(self, event):
-        """Действия при закрытии окна"""
-        self.stop_audio_listening()
-        if self.api_worker and self.api_worker.isRunning():
-            self.api_worker.terminate()
-        event.accept()
+        """Обработка закрытия окна"""
+        self.audio_manager.cleanup()
+        self.screenshot_manager.cleanup()
+        self.history_manager.cleanup()
+        self.api_client.cancel_current()
+        logging.info("Application closed")
+        super().closeEvent(event)

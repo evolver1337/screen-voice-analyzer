@@ -5,6 +5,47 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import os
+from PyQt6.QtCore import QObject, pyqtSignal
+
+
+class APIClient(QObject):
+    response_received = pyqtSignal(str)
+    error_occurred = pyqtSignal(str)
+    progress_updated = pyqtSignal(int)
+
+    def __init__(self):
+        super().__init__()
+        self.current_worker = None
+
+    def send_request(self, api_name: str, prompt: str):
+        """Отправка запроса через APIWorker"""
+        if self.current_worker and self.current_worker.isRunning():
+            self.current_worker.terminate()
+
+        self.current_worker = APIWorker(api_name, prompt)
+        self.current_worker.finished.connect(self._handle_response)
+        self.current_worker.error.connect(self._handle_error)
+        self.current_worker.progress.connect(self._handle_progress)
+        self.current_worker.start()
+
+    def cancel_current(self):
+        """Отмена текущего запроса"""
+        if self.current_worker and self.current_worker.isRunning():
+            self.current_worker.terminate()
+
+    def _handle_response(self, response: str):
+        """Обработка успешного ответа"""
+        self.response_received.emit(response)
+
+    def _handle_error(self, error: str):
+        """Обработка ошибки"""
+        self.error_occurred.emit(error)
+
+    def _handle_progress(self, value: int):
+        """Обновление прогресса"""
+        self.progress_updated.emit(value)
+
 class APIWorker(QThread):
     finished = pyqtSignal(str)
     error = pyqtSignal(str)
