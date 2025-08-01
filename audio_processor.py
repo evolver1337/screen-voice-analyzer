@@ -1,19 +1,21 @@
-from PyQt6.QtCore import QThread, pyqtSignal, QObject
+from PyQt6.QtCore import QThread, pyqtSignal, QObject, QTimer, QMetaObject, Qt
 import numpy as np
 import sounddevice as sd
 from queue import Queue
 import logging
 from datetime import datetime
+
+from speech_analyzer import SpeechDetector
 from speech_recognizer import WhisperRecognizer
 
 
 class AudioProcessor(QThread):
     finished = pyqtSignal(str, str)  # text, session_id
 
-    def __init__(self, audio_queue, model_size="small"):
+    def __init__(self, audio_queue, recognizer):
         super().__init__()
         self.queue = audio_queue
-        self.recognizer = WhisperRecognizer(model_size)
+        self.recognizer = recognizer
         self.session_id = None
 
     def run(self):
@@ -29,59 +31,84 @@ class AudioProcessor(QThread):
 
 
 class AudioSystem(QObject):
-    text_ready = pyqtSignal(str, str)  # text, session_id
-    status_changed = pyqtSignal(str, str)  # status, session_id
+    audio_data_ready = pyqtSignal(np.ndarray)  # сигнал для передачи блока аудио на распознавание
+    status_changed = pyqtSignal(str, str)  # статус, session_id
+    silence_timeout = pyqtSignal(str)  # session_id для автоотправки
 
     def __init__(self, model_size="small"):
         super().__init__()
         self.is_recording = False
         self.stream = None
-        self.audio_queue = Queue(maxsize=3)
         self.sample_rate = 16000
         self.buffer = []
-        self.processors = []
         self.current_session = None
-        self._init_processors(model_size)
 
-        # Настройка логгера
+        self.silence_timer = QTimer()
+        self.silence_timer.setInterval(1500)  # 1.5 секунды тишины
+        self.silence_timer.setSingleShot(True)
+        self.silence_timer.timeout.connect(self._on_silence_timeout)
+
         self.logger = logging.getLogger("AUDIO")
         self.logger.setLevel(logging.INFO)
         handler = logging.FileHandler("audio_sessions.log")
         handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
         self.logger.addHandler(handler)
 
-    def _init_processors(self, model_size):
-        for i in range(2):
-            processor = AudioProcessor(self.audio_queue, model_size)
-            processor.finished.connect(self.text_ready.emit)
-            processor.start()
-            self.processors.append(processor)
+        # Нужно инициализировать SpeechDetector как в твоем коде
+        from speech_analyzer import SpeechDetector
+        self.speech_detector = SpeechDetector()
 
-    def _new_session_id(self):
-        return datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.last_speech_detected = False
 
     def audio_callback(self, indata, frames, time, status):
         if status:
             self.logger.warning(f"Session {self.current_session} - Audio status: {status}")
 
+        audio_int16 = indata.flatten()
+
+        is_speech = False
+        frame_size = 480
+        num_frames = len(audio_int16) // frame_size
+
+        for i in range(num_frames):
+            frame = audio_int16[i * frame_size:(i + 1) * frame_size]
+            try:
+                if self.speech_detector.vad.is_speech(frame.tobytes(), sample_rate=self.sample_rate):
+                    is_speech = True
+                    break
+            except Exception as e:
+                self.logger.error(f"Speech detection error: {e}")
+
+        if is_speech:
+            if not self.last_speech_detected:
+                self.logger.info(f"Session {self.current_session} - Speech detected")
+            self.last_speech_detected = True
+            QMetaObject.invokeMethod(self.silence_timer, "stop", Qt.ConnectionType.QueuedConnection)
+        else:
+            if self.last_speech_detected:
+                QMetaObject.invokeMethod(self.silence_timer, "start", Qt.ConnectionType.QueuedConnection)
+            self.last_speech_detected = False
+
         self.buffer.append(indata.copy())
-        if len(self.buffer) >= self.sample_rate * 3:  # 3 секунды
+
+        # Когда накопилось примерно 3 секунды аудио (3 * 16000 = 48000 сэмплов)
+        total_samples = sum(b.shape[0] for b in self.buffer)
+        if total_samples >= self.sample_rate * 3:
             self._process_buffer()
 
     def _process_buffer(self):
         audio_chunk = np.concatenate(self.buffer)
-        self.buffer = []
+        self.buffer.clear()
         try:
-            self.audio_queue.put_nowait((audio_chunk, self.current_session))
-            self.logger.info(f"Session {self.current_session} - Audio chunk queued")
-        except:
-            self.logger.warning(f"Session {self.current_session} - Queue full, chunk dropped")
+            self.audio_data_ready.emit(audio_chunk)
+            self.logger.info(f"Session {self.current_session} - Audio chunk emitted for recognition")
+        except Exception as e:
+            self.logger.warning(f"Session {self.current_session} - Failed to emit audio chunk: {e}")
 
     def start_recording(self):
         if self.is_recording:
             return
-
-        self.current_session = self._new_session_id()
+        self.current_session = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.is_recording = True
 
         self.stream = sd.InputStream(
@@ -89,13 +116,12 @@ class AudioSystem(QObject):
             channels=1,
             dtype='int16',
             callback=self.audio_callback,
-            blocksize=self.sample_rate
+            blocksize=480  # примерно 30 мс
         )
         self.stream.start()
 
-        start_msg = f"STARTED Session {self.current_session}"
-        self.status_changed.emit(start_msg, self.current_session)
-        self.logger.info(start_msg)
+        self.status_changed.emit(f"STARTED Session {self.current_session}", self.current_session)
+        self.logger.info(f"STARTED Session {self.current_session}")
 
     def stop_recording(self):
         if not self.is_recording:
@@ -105,19 +131,21 @@ class AudioSystem(QObject):
         if self.stream:
             self.stream.stop()
             self.stream.close()
+            self.stream = None
 
         if self.buffer:
             self._process_buffer()
 
-        stop_msg = f"STOPPED Session {self.current_session}"
-        self.status_changed.emit(stop_msg, self.current_session)
-        self.logger.info(stop_msg)
+        self.status_changed.emit(f"STOPPED Session {self.current_session}", self.current_session)
+        self.logger.info(f"STOPPED Session {self.current_session}")
+
         self.current_session = None
+        QMetaObject.invokeMethod(self.silence_timer, "stop", Qt.ConnectionType.QueuedConnection)
+
+    def _on_silence_timeout(self):
+        self.logger.info(f"Session {self.current_session} - Silence timeout reached, auto sending")
+        self.silence_timeout.emit(self.current_session)
 
     def cleanup(self):
         self.stop_recording()
-        for _ in self.processors:
-            self.audio_queue.put(None)
-        for p in self.processors:
-            p.wait(3000)
-        self.logger.info("Service shutdown")
+        self.logger.info("Audio system cleaned up")
