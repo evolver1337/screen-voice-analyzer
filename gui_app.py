@@ -1,17 +1,21 @@
 import logging
-from PyQt6.QtCore import Qt, QPoint, QTimer, QRect, QSize
+
+from PyQt6.QtCore import Qt, QRect, QSize
+from PyQt6.QtGui import QTextCursor
 from PyQt6.QtWidgets import (
     QMainWindow, QVBoxLayout, QHBoxLayout, QWidget,
     QTextEdit, QPushButton, QComboBox, QProgressBar,
-    QLabel, QGroupBox, QLineEdit, QListWidget, QRubberBand
+    QLabel, QGroupBox, QLineEdit, QListWidget, QRubberBand, QSizePolicy
 )
-from PyQt6.QtGui import QTextCursor
+from markdown import markdown
+from markdown.extensions.codehilite import CodeHiliteExtension
+
+from api_client import APIWorker, APIClient  # Ваш реальный клиент API
 from audio_manager import AudioManager
-from screenshot_manager import ScreenshotManager
 from history_manager import HistoryManager
+from screenshot_manager import ScreenshotManager
 from speech_recognizer import WhisperRecognizer
 from text_formatter import TextFormatter, MarkdownHighlighter
-from api_client import APIWorker, APIClient  # Ваш реальный клиент API
 
 
 class MainWindow(QMainWindow):
@@ -19,11 +23,24 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.whisper = WhisperRecognizer()
         self._init_managers()
+        self.audio_manager.text_ready.connect(self._on_audio_text_ready)
         self._setup_ui()
         self._connect_signals()
         self._setup_styles()
         self._init_rubber_band()
+        self.audio_manager.audio.audio_data_ready.connect(self._process_audio_data)
+        self.whisper.text_recognized.connect(self._on_audio_text_ready)
+        self.whisper.error_occurred.connect(self._handle_error)
+        self.history = []
         logging.info("Application initialized")
+
+    def _process_audio_data(self, audio_data):
+        try:
+            text = self.whisper.recognize_audio(audio_data)
+            if text:
+                self.whisper.text_recognized.emit(text)
+        except Exception as e:
+            self._handle_error(f"Ошибка распознавания аудио: {e}")
 
     def _init_managers(self):
         """Инициализация всех менеджеров"""
@@ -97,36 +114,69 @@ class MainWindow(QMainWindow):
         """)
 
     def _setup_tool_panel(self):
-        """Настройка панели инструментов"""
+        """Настройка панели инструментов с двумя горизонтальными линиями"""
         self.tool_group = QGroupBox("Инструменты")
-        layout = QHBoxLayout()
-        layout.setSpacing(10)
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(5)
 
-        # Выбор API
+        # Верхняя линия с кнопками очистки истории и повторным запросом
+        top_layout = QHBoxLayout()
+        top_layout.setSpacing(10)
+
+        self.btn_clear_history = QPushButton(" 🗑️Очистить историю")
+        self.btn_repeat_request = QPushButton(" 🔁Повторить запрос")
+
+        # Ограничим ширину кнопок, чтобы были аккуратнее
+        for btn in [self.btn_clear_history, self.btn_repeat_request]:
+            btn.setMaximumWidth(140)
+            btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        top_layout.addWidget(self.btn_clear_history)
+        top_layout.addWidget(self.btn_repeat_request)
+        top_layout.addStretch(1)  # Отодвинем кнопки влево
+
+        # Нижняя линия с остальными контролами
+        bottom_layout = QHBoxLayout()
+        bottom_layout.setSpacing(10)
+
         self.api_selector = QComboBox()
         self.api_selector.addItems(["Cody", "OpenAI", "DeepSeek"])
 
-        # Режим аудио
         self.audio_mode = QComboBox()
         self.audio_mode.addItems(["Системный звук", "Выключено"])
 
-        # Кнопки
-        self.btn_select_area = QPushButton("🖱️ Выбрать область")
+        self.btn_select_area = QPushButton("Выбрать область")
         self.btn_select_area.setCheckable(True)
-        self.btn_analyze = QPushButton("📸 Анализ кода")
-        self.btn_clear = QPushButton("🧹 Очистить")
-        self.btn_audio_toggle = QPushButton("🎤 Включить аудио")
+        self.btn_analyze = QPushButton(" 📸Анализ кода")
+        self.btn_clear = QPushButton("🧹Очистить")
+        self.btn_audio_toggle = QPushButton(" 🎤Включить аудио")
 
-        layout.addWidget(QLabel("API:"))
-        layout.addWidget(self.api_selector)
-        layout.addWidget(QLabel("Режим:"))
-        layout.addWidget(self.audio_mode)
-        layout.addWidget(self.btn_select_area)
-        layout.addWidget(self.btn_analyze)
-        layout.addWidget(self.btn_clear)
-        layout.addWidget(self.btn_audio_toggle)
+        # Ограничим ширину кнопок
+        buttons = [
+            self.btn_select_area,
+            self.btn_analyze,
+            self.btn_clear,
+            self.btn_audio_toggle,
+        ]
+        for btn in buttons:
+            btn.setMaximumWidth(130)
+            btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
-        self.tool_group.setLayout(layout)
+        bottom_layout.addWidget(QLabel("API:"))
+        bottom_layout.addWidget(self.api_selector)
+        bottom_layout.addWidget(QLabel("Режим:"))
+        bottom_layout.addWidget(self.audio_mode)
+        bottom_layout.addWidget(self.btn_select_area)
+        bottom_layout.addWidget(self.btn_analyze)
+        bottom_layout.addWidget(self.btn_clear)
+        bottom_layout.addWidget(self.btn_audio_toggle)
+        bottom_layout.addStretch(1)
+
+        # Собираем общий лэйаут
+        main_layout.addLayout(top_layout)
+        main_layout.addLayout(bottom_layout)
+
+        self.tool_group.setLayout(main_layout)
 
     def _setup_text_areas(self):
         """Настройка текстовых областей"""
@@ -149,6 +199,17 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("🔴 Ожидание действий")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
+    def _on_audio_text_ready(self, text):
+        logging.info(f"Audio text received: {text}")
+        self.response_area.append(f"<b>🎤 Распознано аудио:</b><br>{text}<br>")
+
+        # Для отправки в API
+        self._start_processing("Отправка распознанного текста в API...")
+        self.api_client.send_request(
+            api_name=self.api_selector.currentText(),
+            prompt=text
+        )
+
     def _connect_signals(self):
         """Подключение сигналов и слотов"""
         # Кнопки
@@ -156,6 +217,9 @@ class MainWindow(QMainWindow):
         self.btn_analyze.clicked.connect(self._analyze_code)
         self.btn_clear.clicked.connect(self._clear_output)
         self.btn_audio_toggle.clicked.connect(self._toggle_audio)
+
+        self.btn_repeat_request.clicked.connect(self._repeat_request)
+        self.btn_clear_history.clicked.connect(self._clear_history)
 
         # Выпадающие списки
         self.audio_mode.currentIndexChanged.connect(self._change_audio_mode)
@@ -177,6 +241,25 @@ class MainWindow(QMainWindow):
         self.api_client.response_received.connect(self._handle_api_response)
         self.api_client.error_occurred.connect(self._handle_error)
         self.api_client.progress_updated.connect(self._update_progress)
+
+    def _clear_history(self):
+        self.history_manager.clear_history()
+        self._update_status("История запросов очищена")
+
+    def _repeat_request(self):
+        """Повторно отправляет выбранный запрос из истории"""
+        item = self.history_panel.currentItem()
+        if not item:
+            return
+
+        item_data = item.data(Qt.ItemDataRole.UserRole)
+        question = item_data.get("prompt", "")
+        if question:
+            self.question_input.setText(question)
+            self._send_prompt()
+    def _send_prompt(self):
+        # Если есть существующий метод send_prompt, просто вызови его
+        self._ask_question()
 
     def _setup_styles(self):
         """Настройка стилей приложения"""
@@ -400,7 +483,14 @@ class MainWindow(QMainWindow):
             self.history_manager.add_item(question, response)
 
             # Отображаем ответ
-            self.response_area.append(self.text_formatter.format_text(response))
+            html = markdown(
+                response,
+                extensions=[
+                    'fenced_code',
+                    CodeHiliteExtension(linenums=False, guess_lang=True, noclasses=True)
+                ]
+            )
+            self.response_area.setHtml(html)
             self._finish_processing()
 
         except Exception as e:
@@ -450,6 +540,7 @@ class MainWindow(QMainWindow):
 
     def handle_response(self, response):
         """Обработка ответа от API"""
+        logging.info(response)
         self.response_area.append(f"🤖 Ответ:\n{response}\n{'=' * 50}\n")
         self.scroll_to_bottom()
         self.progress_bar.setVisible(False)
