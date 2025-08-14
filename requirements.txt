@@ -9,3 +9,10 @@ requests~=2.31.0
 python-dotenv~=1.0.1
 Pygments~=2.17.2
 faster-whisper~=1.1.1
+PyQt6>=6.0
+python-dotenv>=1.0.0
+openai>=1.0.0
+requests>=2.31.0
+pydub>=0.25.1
+SpeechRecognition>=3.10.1
+whisper @ git+https://github.com/openai/whisper.git

@@ -13,6 +13,7 @@ from markdown.extensions.codehilite import CodeHiliteExtension
 from api_client import APIWorker, APIClient  # Ваш реальный клиент API
 from audio_manager import AudioManager
 from history_manager import HistoryManager
+from overlay_for_screenshot import ScreenSelectionOverlay
 from screenshot_manager import ScreenshotManager
 from speech_recognizer import WhisperRecognizer
 from text_formatter import TextFormatter, MarkdownHighlighter
@@ -32,6 +33,10 @@ class MainWindow(QMainWindow):
         self.whisper.text_recognized.connect(self._on_audio_text_ready)
         self.whisper.error_occurred.connect(self._handle_error)
         self.history = []
+        self.selection_overlay = None
+        self.selected_region = None
+        self.btn_select_area.clicked.connect(self._toggle_area_selection)
+
         logging.info("Application initialized")
 
     def _process_audio_data(self, audio_data):
@@ -351,60 +356,56 @@ class MainWindow(QMainWindow):
             }
         """)
 
-    def mousePressEvent(self, event):
-        """Обработка нажатия мыши для выделения области"""
-        if self.btn_select_area.isChecked() and event.button() == Qt.MouseButton.LeftButton:
-            self.origin = event.pos()
-            self.rubber_band.setGeometry(QRect(self.origin, QSize()))
-            self.rubber_band.show()
-            event.accept()
-        else:
-            super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        """Обработка движения мыши для выделения области"""
-        if self.btn_select_area.isChecked() and self.rubber_band.isVisible():
-            self.rubber_band.setGeometry(QRect(self.origin, event.pos()).normalized())
-            event.accept()
-        else:
-            super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        """Обработка отпускания мыши для завершения выделения"""
-        if self.btn_select_area.isChecked() and self.rubber_band.isVisible():
-            rect = self.rubber_band.geometry()
-            if rect.width() > 10 and rect.height() > 10:
-                screen_rect = QRect(
-                    self.mapToGlobal(rect.topLeft()),
-                    self.mapToGlobal(rect.bottomRight())
-                )
-                self.selected_region = (
-                    screen_rect.x(),
-                    screen_rect.y(),
-                    screen_rect.width(),
-                    screen_rect.height()
-                )
-                self._update_status(f"✅ Область: {rect.width()}x{rect.height()} пикс.")
-
-            self.rubber_band.hide()
-            self.btn_select_area.setChecked(False)
-            self.setCursor(Qt.CursorShape.ArrowCursor)
-            event.accept()
-        else:
-            super().mouseReleaseEvent(event)
-
     def _toggle_area_selection(self, checked):
-        """Переключение режима выбора области"""
-        self.setCursor(Qt.CursorShape.CrossCursor if checked else Qt.CursorShape.ArrowCursor)
-        self.btn_select_area.setText("🚫 Отменить" if checked else "🖱️ Выбрать область")
+        logging.info(f"_toggle_area_selection called with checked={checked}")
+        if checked:
+            self.selection_overlay = ScreenSelectionOverlay()
+            self.selection_overlay.selection_made.connect(self._on_selection_made)
+            self.selection_overlay.show()
+            self.btn_select_area.setText("🚫 Отменить")
+        else:
+            if self.selection_overlay:
+                self.selection_overlay.close()
+                self.selection_overlay = None
+            self.btn_select_area.setText("🖱️ Выбрать область")
+
+    def _on_selection_made(self, rect: QRect):
+        # Получаем глобальные координаты выделенной области
+        geo = self.selection_overlay.geometry()
+        global_rect = QRect(
+            geo.x() + rect.x(),
+            geo.y() + rect.y(),
+            rect.width(),
+            rect.height()
+        )
+        self.selected_region = (
+            global_rect.x(),
+            global_rect.y(),
+            global_rect.width(),
+            global_rect.height()
+        )
+        self._update_status(f"✅ Область: {global_rect.width()}x{global_rect.height()} пикс.")
+        self.btn_select_area.setChecked(False)
+        self.btn_select_area.setText("🖱️ Выбрать область")
+        self.selection_overlay = None
 
     def _analyze_code(self):
-        """Анализ кода в выделенной области"""
-        if not hasattr(self, 'selected_region') or not self.selected_region:
-            self._handle_error("Сначала выберите область для захвата")
-            return
+        """Анализ кода в выделенной области или всего экрана"""
+        if not self.selected_region:
+            # Автоматически выбираем весь экран
+            screen = self.screen().geometry()
+            self.selected_region = (
+                screen.x(),
+                screen.y(),
+                screen.width(),
+                screen.height()
+            )
+            self._update_status(
+                f"📺 Автоматически выбрана область всего экрана: {screen.width()}x{screen.height()}")
 
         self._start_processing("Захват экрана...")
+
+        # ➤ Захват экрана выполняет ScreenshotManager, не CodeAnalyzer
         self.screenshot_manager.set_region(self.selected_region)
         self.screenshot_manager.capture_and_analyze()
 

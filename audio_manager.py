@@ -1,6 +1,6 @@
-from PyQt6.QtCore import QObject, pyqtSignal, QTimer
-import logging
+from PyQt6.QtCore import QObject, pyqtSignal
 import numpy as np
+import logging
 
 from audio_processor import AudioSystem
 from speech_recognizer import WhisperRecognizer
@@ -22,6 +22,7 @@ class AudioManager(QObject):
         self.current_text = ""
         self.is_recording = False
         self.current_mode = "system"
+        self.audio_buffer = []  # сюда складываем аудио чанки от AudioSystem
 
     def set_mode(self, mode_index):
         modes = ["system", "microphone", "off"]
@@ -54,22 +55,31 @@ class AudioManager(QObject):
         logging.info("Audio recording stopped")
 
     def _on_audio_data_ready(self, audio_data: np.ndarray):
+        if audio_data is None or len(audio_data) == 0:
+            logging.error("Получены некорректные аудиоданные: None или пустой массив")
+            self.error_occurred.emit("Ошибка: пустые аудиоданные")
+            return
+        self.audio_buffer.append(audio_data)
+        logging.info(f"Received audio chunk, length={len(audio_data)}")
+
+    def _on_silence_timeout(self, session_id):
+        logging.info(f"Silence timeout received, starting recognition. Chunks in buffer: {len(self.audio_buffer)}")
+        if not self.audio_buffer:
+            return
+
+        # Собираем весь накопленный буфер в один массив
+        full_audio = np.concatenate(self.audio_buffer)
+        self.audio_buffer.clear()
+
         try:
-            text = self.recognizer.recognize_audio(audio_data)
+            text = self.recognizer.recognize_audio(full_audio)
             if text:
-                self.current_text += " " + text
-                logging.info(f"Recognized partial text: {text}")
+                self.current_text = text.strip()
+                self.text_ready.emit(self.current_text)
+                logging.info(f"Recognized full text: {self.current_text}")
         except Exception as e:
             self.error_occurred.emit(f"Recognition error: {e}")
             logging.error(f"Recognition error: {e}")
-
-    def _on_silence_timeout(self, session_id):
-        # Таймаут тишины — значит закончился фрагмент речи
-        if self.current_text.strip():
-            self.text_ready.emit(self.current_text.strip())
-            logging.info(
-                f"Final text emitted for session {session_id}: {self.current_text.strip()}")
-            self.current_text = ""
 
     def cleanup(self):
         self.audio.cleanup()

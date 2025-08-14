@@ -29,6 +29,13 @@ class HistoryManager(QObject):
     def add_item(self, prompt: str, response: str):
         """Добавляет новый элемент в историю"""
         try:
+            if not isinstance(prompt, str):
+                logging.warning(f"Невалидный prompt: {prompt!r}")
+                prompt = "(пусто)"
+            if not isinstance(response, str):
+                logging.warning(f"Невалидный response: {response!r}")
+                response = "(нет ответа)"
+
             is_error = "❌" in response
             timestamp = datetime.now().isoformat()
 

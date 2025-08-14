@@ -1,6 +1,6 @@
 import logging
-from PyQt6.QtCore import QObject, QRect, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtGui import QPixmap, QGuiApplication
 from ocr_analyzer import CodeAnalyzer
 
 
@@ -24,19 +24,26 @@ class ScreenshotManager(QObject):
         """Захват экрана и анализ кода"""
         if not self.selected_region:
             self.error_occurred.emit("Не выбрана область для захвата")
+            logging.error("Сначала выберите область для захвата")
             return
 
         try:
             x, y, w, h = self.selected_region
-            screenshot = self.code_analyzer.capture_screen(
-                region=(x, y, x + w, y + h))
+            screen = QGuiApplication.primaryScreen()
+
+            if not screen:
+                raise RuntimeError("Экран не найден")
+
+            screenshot: QPixmap = screen.grabWindow(0, x, y, w, h)
 
             if screenshot.isNull():
                 raise ValueError("Не удалось сделать скриншот")
 
             self.screenshot_taken.emit(screenshot)
 
+            # ➤ Передаём изображение в CodeAnalyzer
             text = self.code_analyzer.analyze_image(screenshot)
+
             if not text.strip():
                 raise ValueError("Не удалось распознать текст")
 

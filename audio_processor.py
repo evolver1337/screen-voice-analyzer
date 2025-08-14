@@ -30,12 +30,22 @@ class AudioProcessor(QThread):
                 self.finished.emit(text, self.session_id)
 
 
-class AudioSystem(QObject):
-    audio_data_ready = pyqtSignal(np.ndarray)  # сигнал для передачи блока аудио на распознавание
-    status_changed = pyqtSignal(str, str)  # статус, session_id
-    silence_timeout = pyqtSignal(str)  # session_id для автоотправки
+from PyQt6.QtCore import QObject, pyqtSignal, QTimer, QMetaObject, Qt
+import numpy as np
+import logging
+from datetime import datetime
+import sounddevice as sd
 
-    def __init__(self, model_size="small"):
+from speech_analyzer import SpeechDetector  # твой VAD
+from speech_recognizer import WhisperRecognizer  # твой распознаватель
+
+
+class AudioSystem(QObject):
+    audio_data_ready = pyqtSignal(np.ndarray)  # весь буфер после тишины
+    status_changed = pyqtSignal(str, str)  # статус, session_id
+    silence_timeout = pyqtSignal(str)  # session_id
+
+    def __init__(self):
         super().__init__()
         self.is_recording = False
         self.stream = None
@@ -44,7 +54,7 @@ class AudioSystem(QObject):
         self.current_session = None
 
         self.silence_timer = QTimer()
-        self.silence_timer.setInterval(1500)  # 1.5 секунды тишины
+        self.silence_timer.setInterval(3000)  # 3 секунды тишины
         self.silence_timer.setSingleShot(True)
         self.silence_timer.timeout.connect(self._on_silence_timeout)
 
@@ -54,8 +64,6 @@ class AudioSystem(QObject):
         handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
         self.logger.addHandler(handler)
 
-        # Нужно инициализировать SpeechDetector как в твоем коде
-        from speech_analyzer import SpeechDetector
         self.speech_detector = SpeechDetector()
 
         self.last_speech_detected = False
@@ -89,21 +97,18 @@ class AudioSystem(QObject):
                 QMetaObject.invokeMethod(self.silence_timer, "start", Qt.ConnectionType.QueuedConnection)
             self.last_speech_detected = False
 
+        # Добавляем в буфер каждый вызов audio_callback (минимальные блоки ~30ms)
         self.buffer.append(indata.copy())
 
-        # Когда накопилось примерно 3 секунды аудио (3 * 16000 = 48000 сэмплов)
-        total_samples = sum(b.shape[0] for b in self.buffer)
-        if total_samples >= self.sample_rate * 3:
-            self._process_buffer()
-
-    def _process_buffer(self):
+    def _on_silence_timeout(self):
+        if not self.buffer:
+            return
         audio_chunk = np.concatenate(self.buffer)
         self.buffer.clear()
-        try:
-            self.audio_data_ready.emit(audio_chunk)
-            self.logger.info(f"Session {self.current_session} - Audio chunk emitted for recognition")
-        except Exception as e:
-            self.logger.warning(f"Session {self.current_session} - Failed to emit audio chunk: {e}")
+
+        self.logger.info(f"Session {self.current_session} - Silence timeout reached, emitting full audio chunk")
+        self.audio_data_ready.emit(audio_chunk)
+        self.silence_timeout.emit(self.current_session)
 
     def start_recording(self):
         if self.is_recording:
@@ -133,18 +138,18 @@ class AudioSystem(QObject):
             self.stream.close()
             self.stream = None
 
+        # Если что-то осталось в буфере — обработать и отправить
         if self.buffer:
-            self._process_buffer()
+            audio_chunk = np.concatenate(self.buffer)
+            self.buffer.clear()
+            self.audio_data_ready.emit(audio_chunk)
+            self.logger.info(f"Session {self.current_session} - Final audio chunk emitted on stop")
 
         self.status_changed.emit(f"STOPPED Session {self.current_session}", self.current_session)
         self.logger.info(f"STOPPED Session {self.current_session}")
 
         self.current_session = None
         QMetaObject.invokeMethod(self.silence_timer, "stop", Qt.ConnectionType.QueuedConnection)
-
-    def _on_silence_timeout(self):
-        self.logger.info(f"Session {self.current_session} - Silence timeout reached, auto sending")
-        self.silence_timeout.emit(self.current_session)
 
     def cleanup(self):
         self.stop_recording()
